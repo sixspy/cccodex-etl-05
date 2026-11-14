@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>抽取转换加载台</title>
+  <title>抽取转换加载台 · 映射版本钉版</title>
   <link rel="stylesheet" href="/static/css/etl.css" />
   <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 </head>
@@ -14,41 +14,214 @@
       <span class="who">{{ me }}</span>
       <button class="ghost" @click="logout">退出</button>
     </header>
-    <p class="muted">基线能力：管道列表、抽取、落库。后续题面在此叠加增量水位、清洗规则、并发争用等。</p>
+
+    <div class="policy-bar">
+      <span class="brand">换版设置</span>
+      <template v-if="policy">
+        <span class="tag ok">已锁定</span>
+        <b>当日策略：</b>{{ policy.policy_name }}
+        <span class="muted">策略当天锁定，不可更换</span>
+      </template>
+      <template v-else>
+        <span class="tag warn">未设定</span>
+        <span class="muted">今日尚未锁定换版策略，发起换版前请先设定。</span>
+      </template>
+    </div>
+
+    <p class="muted">映射版本只增不改；管道创建即绑定一版映射，创建后只能换到更新版本。换版裁决在服务端，版本差异在前端计算。</p>
+
     <div class="board">
       <section class="panel">
-        <h2>管道列表</h2>
+        <h2>管道总览</h2>
         <div v-if="!items.length" class="empty">暂无管道</div>
-        <div
-          v-for="p in items"
-          :key="p.id"
-          class="row"
-          :class="{ active: current && current.id === p.id }"
-          @click="open(p.id)"
-        >
-          <div>
-            <div>{{ p.title }}</div>
-            <div class="code">{{ p.code }} · {{ p.source_uri }}</div>
-          </div>
-          <span class="tag" :class="tagClass(p.status)">{{ p.status }}</span>
-        </div>
+        <table v-else class="grid">
+          <thead>
+            <tr>
+              <th>管道</th>
+              <th>状态</th>
+              <th>绑定版本号</th>
+              <th>今日转换数</th>
+              <th>撤回次数</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="p in items"
+              :key="p.id"
+              :class="{ active: current && current.id === p.id }"
+              @click="open(p.id)"
+            >
+              <td>
+                <div>{{ p.title }}</div>
+                <div class="code">{{ p.code }}</div>
+              </td>
+              <td><span class="tag" :class="tagClass(p.status)">{{ p.status }}</span></td>
+              <td><span class="version">{{ p.bound_version_label }}</span></td>
+              <td><span class="num">{{ p.today_transforms }}</span></td>
+              <td><span class="num">{{ p.withdraw_count }}</span></td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="legend">策略名：{{ policy ? policy.policy_name : "未设定" }}</p>
       </section>
+
       <section class="panel">
-        <h2>管道详情</h2>
-        <div v-if="!current" class="empty">点左侧一条查看抽取与落库状态</div>
+        <h2>转换详情</h2>
+        <div v-if="!current" class="empty">点左侧一条管道查看绑定版本与批次</div>
         <template v-else>
           <p class="kv"><b>题名</b>{{ current.title }}</p>
           <p class="kv"><b>编码</b><span class="code">{{ current.code }}</span></p>
           <p class="kv"><b>源地址</b><span class="code">{{ current.source_uri }}</span></p>
           <p class="kv"><b>状态</b><span class="tag" :class="tagClass(current.status)">{{ current.status }}</span></p>
-          <p class="kv"><b>已抽取</b>{{ current.extracted }}</p>
-          <p class="kv"><b>已落库</b>{{ current.loaded }}</p>
+          <p class="kv"><b>绑定版本</b><span class="version">{{ current.bound_version_label }}</span></p>
+          <p class="kv"><b>今日转换数</b><span class="num">{{ current.today_transforms }}</span></p>
+          <p class="kv"><b>撤回次数</b><span class="num">{{ current.withdraw_count }}</span></p>
+          <p class="kv"><b>批次状态</b>{{ current.batch_status }}<span v-if="current.confirmed" class="tag ok">版本已钉死</span></p>
+          <p class="kv"><b>批次行数</b>抽出 {{ current.batch_rows_extracted }} · 落库 {{ current.batch_rows_loaded }} · 撤回 {{ current.batch_rows_withdrawn }}</p>
+
           <div class="actions">
             <button @click="extract" :disabled="busy">执行抽取</button>
             <button class="ghost" @click="load" :disabled="busy">执行落库</button>
+            <button class="ghost" @click="withdraw" :disabled="busy || !current.can_withdraw">整批撤回</button>
+            <button class="ghost" @click="confirm" :disabled="busy || !current.batch_rows_loaded">确认批次</button>
           </div>
+
+          <h3>版本差异</h3>
+          <div class="actions">
+            <select v-model="diffFrom" class="pick">
+              <option v-for="v in current.versions" :key="v.id" :value="v.version_no">{{ v.version_label }}（{{ v.status }}）</option>
+            </select>
+            <span class="muted">对比</span>
+            <select v-model="diffTo" class="pick">
+              <option v-for="v in current.versions" :key="'to' + v.id" :value="v.version_no">{{ v.version_label }}（{{ v.status }}）</option>
+            </select>
+          </div>
+          <div v-if="diff" class="diff">
+            <p class="kv"><b>编码列</b>{{ diff.codeFrom }} → {{ diff.codeTo }}</p>
+            <p class="kv"><b>新增列</b><span class="code">{{ diff.added.length ? diff.added.join(", ") : "无" }}</span></p>
+            <p class="kv"><b>删除列</b><span class="code">{{ diff.removed.length ? diff.removed.join(", ") : "无" }}</span></p>
+            <p class="kv"><b>顺序变化</b><span class="code">{{ diff.reordered.length ? diff.reordered.join(", ") : "无" }}</span></p>
+          </div>
+
+          <h3>换版</h3>
+          <div class="actions">
+            <select v-model="switchTarget" class="pick" :disabled="current.confirmed">
+              <option value="">选择更新版本</option>
+              <option v-for="v in current.newer_versions" :key="v.id" :value="v.version_no">{{ v.version_label }}（{{ v.status }}）</option>
+            </select>
+            <button @click="switchVersion" :disabled="busy || !switchTarget">发起换版</button>
+          </div>
+          <p class="muted">切换后管道按新版本重转换；当日策略决定是否先整批撤回已落行。</p>
+
+          <h3>换版失败</h3>
+          <div v-if="!current.switch_failures.length" class="empty">暂无换版失败</div>
+          <ul v-else class="failures">
+            <li v-for="f in current.switch_failures" :key="f.id">
+              <span class="code">{{ f.created_at }}</span>
+              <span class="muted">v{{ f.from_version_no }} → v{{ f.to_version_no }}</span>
+              <div>{{ f.reason }}</div>
+            </li>
+          </ul>
           <p v-if="msg" class="muted">{{ msg }}</p>
         </template>
+      </section>
+    </div>
+
+    <div class="board">
+      <section class="panel">
+        <h2>映射册（只增不改）</h2>
+        <div class="mapping-list">
+          <div
+            v-for="m in mappings"
+            :key="m.id"
+            class="mapping"
+            :class="{ active: selectedMapping && selectedMapping.id === m.id }"
+            @click="selectMapping(m.id)"
+          >
+            <div class="mapping-head">
+              <div>
+                <div>{{ m.name }}</div>
+                <div class="code">{{ m.code }} · 共 {{ m.version_count }} 个版本</div>
+              </div>
+              <span class="tag" v-if="m.latest_version">最新 {{ m.latest_version.version_label }}</span>
+            </div>
+            <div class="versions-line">
+              <span
+                v-for="v in m.versions"
+                :key="v.id"
+                class="version"
+                :class="{ published: v.status === '已发布' }"
+              >{{ v.version_label }}</span>
+            </div>
+          </div>
+          <div v-if="!mappings.length" class="empty">暂无映射</div>
+        </div>
+
+        <h3>新建映射</h3>
+        <div class="form">
+          <label>名称<input v-model="newMapping.name" placeholder="转换映射名称" /></label>
+          <label>编码<input v-model="newMapping.code" placeholder="mapping code" /></label>
+          <label>列定义<input v-model="newMapping.columns" placeholder="biz_id, metric, status" /></label>
+          <label>编码列<input v-model="newMapping.code_column" placeholder="biz_id" /></label>
+          <button @click="createMapping" :disabled="busy">建立映射 v1</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <template v-if="selectedMapping">
+          <h2>保存新版 · {{ selectedMapping.name }}</h2>
+          <div class="form">
+            <label>列定义<input v-model="newVersion.columns" placeholder="列用逗号分隔" /></label>
+            <label>编码列<input v-model="newVersion.code_column" placeholder="缺编码列禁止发布" /></label>
+            <label>基线版本<input v-model="newVersion.base_version" placeholder="留空由服务端定" /></label>
+            <button @click="saveVersion" :disabled="busy">保存为下一版</button>
+          </div>
+
+          <h3>版本时间线</h3>
+          <div v-for="v in selectedMapping.versions" :key="v.id" class="version-row">
+            <span class="version">{{ v.version_label }}</span>
+            <span class="tag" :class="v.status === '已发布' ? 'ok' : 'warn'">{{ v.status }}</span>
+            <span class="code">{{ v.columns.join(", ") }}</span>
+            <span class="muted">编码列 {{ v.code_column || "缺失" }}</span>
+            <button
+              v-if="v.status !== '已发布'"
+              class="ghost small"
+              @click="publishVersion(v.version_no)"
+              :disabled="busy"
+            >发布</button>
+          </div>
+        </template>
+        <template v-else>
+          <h2>版本登记</h2>
+          <p class="muted">左侧选一条映射，即可保存新版并查看版本时间线。</p>
+        </template>
+      </section>
+    </div>
+
+    <div class="board">
+      <section class="panel">
+        <h2>换版设置</h2>
+        <p class="muted">每日只锁定一种策略，写进当日说明，当天不可更换。</p>
+        <template v-if="policy">
+          <p class="kv"><b>策略名</b>{{ policy.policy_name }}</p>
+          <p class="kv"><b>当日说明</b>{{ policy.note }}</p>
+          <p class="kv"><b>锁定于</b><span class="code">{{ policy.day }} · {{ policy.set_by }}</span></p>
+        </template>
+        <template v-else>
+          <div class="form">
+            <label class="radio">
+              <input type="radio" value="禁切" v-model="policyChoice" />
+              禁切：落库进行中禁止切换映射版本
+            </label>
+            <label class="radio">
+              <input type="radio" value="先撤再落" v-model="policyChoice" />
+              先撤再落：整批撤回已落行后按新版重落
+            </label>
+            <label>当日说明（可选）<input v-model="policyNote" placeholder="补充说明" /></label>
+            <button @click="savePolicy" :disabled="busy || !policyChoice">锁定今日策略</button>
+          </div>
+        </template>
+        <p class="muted">换版请求若偏离当日策略，服务端返回「换版策略走歪了」并记入详情页的换版失败列表。</p>
       </section>
     </div>
   </div>
